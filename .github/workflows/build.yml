@@ -1,0 +1,55 @@
+---
+name: build
+
+# Continuous integration: proves the repository builds from a clean checkout.
+# The end-to-end smoke test (--smoke-test) is intentionally not run here: it
+# needs a real desktop session, WebView2 and a working @agegr/pi-web install.
+# Run it locally with:  .\build.ps1 -SmokeTest
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Structural check (pre-compile sanity pass)
+        run: node tools/check-cs-structure.js src/PiAgentDesktop
+
+      - name: Restore and build
+        run: dotnet build src/PiAgentDesktop/PiAgentDesktop.csproj -c Release
+
+      - name: Publish single file (framework dependent)
+        run: >
+          dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true
+          -o dist
+
+      - name: Report artifact
+        shell: pwsh
+        run: |
+          $exe = Get-Item dist/PiAgentDesktop.exe
+          "version : $($exe.VersionInfo.ProductVersion)"
+          "filever : $($exe.VersionInfo.FileVersion)"
+          "size    : $([math]::Round($exe.Length / 1KB, 1)) KB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiAgentDesktop-framework-dependent
+          path: dist/
+          if-no-files-found: error

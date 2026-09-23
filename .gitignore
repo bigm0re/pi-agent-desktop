@@ -1,0 +1,7 @@
+node_modules/
+dist/
+obj/
+bin/
+smoke-result.json
+smoke-*.json
+*.user

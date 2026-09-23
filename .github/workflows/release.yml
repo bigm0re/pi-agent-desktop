@@ -1,0 +1,95 @@
+---
+name: release
+
+# Pushing a tag like v0.1.1 builds a self-contained, no-install portable zip
+# and attaches it to a GitHub Release. Also runnable by hand from the Actions
+# tab (workflow_dispatch) when you only want the zip artifact.
+
+"on":
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  portable:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve version from the project file
+        id: version
+        shell: pwsh
+        run: |
+          $csproj = 'src/PiAgentDesktop/PiAgentDesktop.csproj'
+          [xml]$project = Get-Content $csproj
+          $group = $project.Project.PropertyGroup |
+                   Where-Object { $_.Version } |
+                   Select-Object -First 1
+          $version = $group.Version
+          if (-not $version) { throw 'No <Version> in csproj.' }
+          Write-Host "version = $version"
+          $out = "value=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $out -Encoding utf8
+
+      # Self-contained: no .NET runtime needed on the target machine, which is
+      # what makes the zip genuinely portable.
+      - name: Publish self-contained single file
+        run: >
+          dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -o dist
+
+      - name: Build portable zip
+        id: package
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.value }}'
+          $name = "PiAgentDesktop-$version-win-x64-portable"
+          Write-Host "packaging $name"
+
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item 'dist/*' package -Recurse -Force
+
+          # XML documentation files are not needed at runtime.
+          Get-ChildItem package -Recurse -File -Include *.xml |
+            Remove-Item -Force
+
+          # Ship the licence and the readme inside the zip.
+          Copy-Item README.md, LICENSE package -Force
+
+          Compress-Archive -Path 'package/*' `
+            -DestinationPath "$name.zip" -Force
+
+          $size = [math]::Round((Get-Item "$name.zip").Length / 1MB, 1)
+          Write-Host "zip size = $size MB"
+          $out = "asset=$name.zip"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $out -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-zip
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+      # Uses the preinstalled gh CLI instead of a third-party release action.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            "${{ steps.package.outputs.asset }}" `
+            --title "Pi Agent Desktop $env:GITHUB_REF_NAME" `
+            --generate-notes
