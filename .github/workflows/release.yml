@@ -1,9 +1,12 @@
 ---
 name: release
 
-# Pushing a tag like v0.1.1 builds a self-contained, no-install portable zip
-# and attaches it to a GitHub Release. Also runnable by hand from the Actions
-# tab (workflow_dispatch) when you only want the zip artifact.
+# Pushing a tag like v0.1.2 builds TWO portable zips and attaches both to a
+# GitHub Release:
+#   * portable        - self-contained, needs nothing but Node.js (~58 MB)
+#   * requires-dotnet8 - framework dependent, ~2 MB, needs the .NET 8 runtime
+# Re-running for the same tag uploads over the existing assets ("--clobber")
+# instead of failing, so the workflow is safe to retry.
 
 "on":
   push:
@@ -40,46 +43,99 @@ jobs:
           $out = "value=$version"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $out -Encoding utf8
 
-      # Self-contained: no .NET runtime needed on the target machine, which is
-      # what makes the zip genuinely portable.
-      - name: Publish self-contained single file
+      # Bundle A: self-contained - nothing to install beyond Node.js.
+      - name: Publish self-contained (portable)
         run: >
           dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
           -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true
           -p:EnableCompressionInSingleFile=true
-          -o dist
+          -o build/full
 
-      - name: Build portable zip
+      # Bundle B: framework dependent - ~2 MB, needs the .NET 8 runtime.
+      - name: Publish framework dependent (requires-dotnet8)
+        run: >
+          dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true
+          -o build/lite
+
+      - name: Package both zips and write the release notes
         id: package
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.value }}'
-          $name = "PiAgentDesktop-$version-win-x64-portable"
-          Write-Host "packaging $name"
+          $full = "PiAgentDesktop-$version-win-x64-portable"
+          $lite = "PiAgentDesktop-$version-win-x64-requires-dotnet8"
 
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item 'dist/*' package -Recurse -Force
+          function New-PortableZip {
+            param([string]$Source, [string]$Name)
+            $stage = Join-Path 'stage' $Name
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
+            Copy-Item "$Source/*" $stage -Recurse -Force
+            # XML docs are not needed at runtime.
+            Get-ChildItem $stage -Recurse -File -Include *.xml |
+              Remove-Item -Force
+            Copy-Item README.md, LICENSE $stage -Force
+            $zip = "$Name.zip"
+            Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+            Write-Host ("{0} = {1} MB" -f $zip, `
+              [math]::Round((Get-Item $zip).Length / 1MB, 1))
+          }
 
-          # XML documentation files are not needed at runtime.
-          Get-ChildItem package -Recurse -File -Include *.xml |
-            Remove-Item -Force
+          New-PortableZip -Source 'build/full' -Name $full
+          New-PortableZip -Source 'build/lite' -Name $lite
 
-          # Ship the licence and the readme inside the zip.
-          Copy-Item README.md, LICENSE package -Force
+          $fullZip = "$full.zip"
+          $liteZip = "$lite.zip"
+          $fullMb = [math]::Round((Get-Item $fullZip).Length / 1MB, 1)
+          $liteMb = [math]::Round((Get-Item $liteZip).Length / 1MB, 1)
+          $fullSha = (Get-FileHash $fullZip -Algorithm SHA256).Hash
+          $liteSha = (Get-FileHash $liteZip -Algorithm SHA256).Hash
 
-          Compress-Archive -Path 'package/*' `
-            -DestinationPath "$name.zip" -Force
+          $runtime = 'https://dotnet.microsoft.com/download/dotnet/8.0'
+          $notes = @(
+            '## 下载哪个？'
+            ''
+            '两个附件功能完全相同，区别只是**有没有把 .NET 运行时打进包里**。'
+            ''
+            '| 附件 | 大小 | 前置要求 |'
+            '| --- | --- | --- |'
+            "| $fullZip | $fullMb MB | 只需 Node.js 22.19+（推荐，开箱即用） |"
+            "| $liteZip | $liteMb MB | 另需 .NET 8 Desktop Runtime |"
+            ''
+            '两者都需要 **Node.js 22.19+**；`@agegr/pi-web` 若未安装，'
+            '程序会提示并可一键安装。'
+            ''
+            "需要 .NET 8 Desktop Runtime 时：$runtime"
+            ''
+            '### 使用'
+            ''
+            '1. 解压到任意目录（不写安装目录、不注册服务）'
+            '2. 双击 `PiAgentDesktop.exe`'
+            '3. 托盘出现图标，点击打开界面；卸载 = 删除该文件夹'
+            ''
+            '### 校验'
+            ''
+            '```text'
+            "$fullSha  $fullZip"
+            "$liteSha  $liteZip"
+            '```'
+          )
+          $notesPath = 'release-notes.md'
+          $notes -join "`n" | Set-Content -Path $notesPath -Encoding utf8
 
-          $size = [math]::Round((Get-Item "$name.zip").Length / 1MB, 1)
-          Write-Host "zip size = $size MB"
-          $out = "asset=$name.zip"
+          $out = "full=$fullZip"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $out -Encoding utf8
+          $out = "lite=$liteZip"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $out -Encoding utf8
 
       - uses: actions/upload-artifact@v4
         with:
-          name: portable-zip
-          path: ${{ steps.package.outputs.asset }}
+          name: portable-zips
+          path: |
+            ${{ steps.package.outputs.full }}
+            ${{ steps.package.outputs.lite }}
           if-no-files-found: error
 
       # Uses the preinstalled gh CLI instead of a third-party release action.
@@ -89,7 +145,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
-            "${{ steps.package.outputs.asset }}" `
-            --title "Pi Agent Desktop $env:GITHUB_REF_NAME" `
-            --generate-notes
+          $tag = $env:GITHUB_REF_NAME
+          $full = '${{ steps.package.outputs.full }}'
+          $lite = '${{ steps.package.outputs.lite }}'
+
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag already exists; uploading assets"
+            gh release upload $tag $full $lite --clobber
+          }
+          else {
+            gh release create $tag $full $lite `
+              --title "Pi Agent Desktop $tag" `
+              --notes-file release-notes.md
+          }
