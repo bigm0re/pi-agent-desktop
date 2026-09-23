@@ -159,20 +159,101 @@ internal static class PiWebInstaller
         using var form = new InstallForm("安装 / 更新 Pi Web");
         form.Shown += async (_, _) =>
         {
-            var exitCode = await RunNpmAsync(form, config, nodePath, npmCli, log).ConfigureAwait(true);
-            var success = exitCode == 0;
-            form.Complete(
-                success,
-                success
-                    ? "安装完成。重新启动服务后即可使用。"
-                    : $"安装失败（退出码 {exitCode}）。请查看上方输出或日志文件。");
+            // A pi-web that is still listening (for example one started by hand in a
+            // terminal, or a reused instance we never owned) keeps the package
+            // directory busy no matter what this process does.
+            try
+            {
+                using var probe = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var listening = await PiWebServer
+                    .IsPiWebListeningAsync(config.HostName, config.Port, probe.Token)
+                    .ConfigureAwait(true);
+
+                if (listening)
+                {
+                    form.Append($"注意：端口 {config.Port} 上仍有 pi-web 在运行。");
+                    form.Append("它占用的正是 npm 要替换的目录，这通常就是 EBUSY 的原因。");
+                    form.Append(string.Empty);
+                }
+            }
+            catch
+            {
+                /* the probe is best effort */
+            }
+
+            // npm replaces a global package by renaming the old directory aside. That
+            // fails with EBUSY while anything still has files open inside it - which
+            // includes the seconds right after our own server is terminated, while the
+            // antivirus is still scanning it. Give that a moment, then retry instead of
+            // treating the first collision as fatal.
+            const int attempts = 3;
+            var exitCode = -1;
+            var locked = false;
+
+            form.SetStatus("等待文件句柄释放…");
+            await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(true);
+
+            for (var attempt = 1; attempt <= attempts; attempt++)
+            {
+                if (attempt > 1)
+                {
+                    form.Append(string.Empty);
+                    form.Append($"--- 目录仍被占用，5 秒后重试（{attempt}/{attempts}）---");
+                    await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(true);
+                }
+
+                var result = await RunNpmAsync(form, config, nodePath, npmCli, log).ConfigureAwait(true);
+                exitCode = result.ExitCode;
+                if (exitCode == 0)
+                {
+                    break;
+                }
+
+                locked = LooksLikeDirectoryLocked(result.Output);
+                if (!locked)
+                {
+                    break; // a genuine failure - retrying would only repeat it
+                }
+            }
+
+            string summary;
+            if (exitCode == 0)
+            {
+                summary = "安装完成。正在重新启动服务…";
+            }
+            else if (locked)
+            {
+                summary = "安装失败：pi-web 目录一直被占用（EBUSY）。";
+                form.Append(string.Empty);
+                form.Append("请按以下步骤处理：");
+                form.Append("  1) 完全退出本程序：托盘图标 → 退出");
+                form.Append("  2) 关闭其它正在运行的 pi-web / pi 窗口");
+                form.Append($"  3) 在终端执行：npm install -g {PackageSpec}");
+                form.Append("  4) 重新启动本程序");
+            }
+            else
+            {
+                summary = $"安装失败（退出码 {exitCode}）。请查看上方输出或日志文件。";
+            }
+
+            form.Complete(exitCode == 0, summary);
         };
 
         form.ShowDialog(owner);
         return form.Succeeded;
     }
 
-    private static async Task<int> RunNpmAsync(InstallForm form, AppConfig config, string nodePath, string npmCli, Log log)
+    /// <summary>True when npm reported the Windows "resource busy or locked" failure.</summary>
+    private static bool LooksLikeDirectoryLocked(string output) =>
+        output.Contains("EBUSY", StringComparison.OrdinalIgnoreCase) ||
+        output.Contains("resource busy or locked", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<(int ExitCode, string Output)> RunNpmAsync(
+        InstallForm form,
+        AppConfig config,
+        string nodePath,
+        string npmCli,
+        Log log)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -196,37 +277,47 @@ internal static class PiWebInstaller
         log.Info($"Running: \"{nodePath}\" \"{npmCli}\" install -g --no-fund --no-audit {PackageSpec}");
         form.Append($"$ npm install -g {PackageSpec}");
 
+        // npm reports the lock on stderr; keep a copy so the caller can tell a lock
+        // apart from a real failure and decide whether a retry is worth it.
+        var captured = new StringBuilder();
+
         try
         {
             using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
             process.OutputDataReceived += (_, e) =>
             {
-                if (e.Data is not null)
+                if (e.Data is null)
                 {
-                    form.Append(e.Data);
-                    log.Child("npm:", e.Data);
+                    return;
                 }
+
+                captured.AppendLine(e.Data);
+                form.Append(e.Data);
+                log.Child("npm:", e.Data);
             };
             process.ErrorDataReceived += (_, e) =>
             {
-                if (e.Data is not null)
+                if (e.Data is null)
                 {
-                    form.Append(e.Data);
-                    log.Child("npm!", e.Data, isError: true);
+                    return;
                 }
+
+                captured.AppendLine(e.Data);
+                form.Append(e.Data);
+                log.Child("npm!", e.Data, isError: true);
             };
 
             process.Start();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             await process.WaitForExitAsync().ConfigureAwait(true);
-            return process.ExitCode;
+            return (process.ExitCode, captured.ToString());
         }
         catch (Exception error)
         {
             log.Error("npm install failed", error);
             form.Append($"错误：{error.Message}");
-            return -1;
+            return (-1, error.Message);
         }
     }
 }

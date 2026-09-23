@@ -9,7 +9,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>PiAgentDesktop</AssemblyName>
     <RootNamespace>PiAgentDesktop</RootNamespace>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
