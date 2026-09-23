@@ -36,6 +36,11 @@ internal sealed class PiWebServer : IDisposable
     private readonly Log _log;
     private readonly JobObject? _job;
     private readonly object _gate = new();
+
+    // Serialises every lifecycle mutation. Without it, overlapping start/stop calls
+    // spawned several servers at once, each reaping the other's freshly spawned child.
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+
     private readonly int? _portOverride;
 
     private Process? _process;
@@ -97,6 +102,42 @@ internal sealed class PiWebServer : IDisposable
 
     public async Task<bool> StartAsync(int? forcedPort = null)
     {
+        // Every lifecycle mutation is serialised. StartAsync is reached from the UI
+        // (ensure-started and restart), from the crash-restart task, from the resume
+        // handler and from the installer. Overlapping calls used to spawn several servers
+        // at once: each one reaped the other's freshly spawned child (exit code -1), the
+        // survivor shifted ports, and the crash-restart fired again - an endless churn
+        // that kept the package directory locked, so every npm install failed.
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await StartCoreAsync(forcedPort).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private static bool IsAlive(Process? process)
+    {
+        if (process is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> StartCoreAsync(int? forcedPort)
+    {
         lock (_gate)
         {
             _stopping = false;
@@ -108,14 +149,39 @@ internal sealed class PiWebServer : IDisposable
         var token = _lifetime!.Token;
         LastError = null;
 
-        // Never stack a server on top of a leaked one: that shifts the port and leaves yet
-        // another process holding the package directory. That is exactly what turned a
-        // single leak into four servers on ports 30141-30144.
+        // A live server already satisfies the request. Spawning a second one is what used
+        // to shift ports and leak processes - and, once reaping was added, to kill our own
+        // sibling over and over.
+        Process? existing;
+        lock (_gate)
+        {
+            existing = _process;
+        }
+
+        if (IsRunning && IsAlive(existing))
+        {
+            _log.Info("The agent server is already running; not starting another one.");
+            return true;
+        }
+
+        // Anything left over from an earlier failed or timed-out start still holds the
+        // package directory, so it has to go before a fresh server is spawned.
+        if (existing is not null)
+        {
+            lock (_gate)
+            {
+                _process = null;
+                ProcessId = 0;
+            }
+
+            await KillProcessTreeAsync(existing).ConfigureAwait(false);
+        }
+
         var leftovers = _job?.KillAll(_log) ?? 0;
         if (leftovers > 0)
         {
             _log.Warn($"Reaped {leftovers} leftover pi-web process(es) before starting.");
-            await Task.Delay(500).ConfigureAwait(false);
+            await Task.Delay(400).ConfigureAwait(false);
         }
 
         SetState(PiWebServerState.Starting, "正在查找 pi agent 运行环境…");
@@ -230,6 +296,31 @@ internal sealed class PiWebServer : IDisposable
     }
 
     public async Task StopAsync(string message = "服务已停止")
+    {
+        // Cancel before waiting for the gate: an in-flight start polls this token and
+        // gives up within one poll interval, so shutdown does not have to wait for the
+        // whole readiness timeout.
+        try
+        {
+            _lifetime?.Cancel();
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await StopCoreAsync(message).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task StopCoreAsync(string message)
     {
         Process? process;
         lock (_gate)
