@@ -4,7 +4,7 @@ name: release
 # Pushing a tag like v0.1.2 builds TWO portable zips and attaches both to a
 # GitHub Release:
 #   * portable        - self-contained, needs nothing but Node.js (~58 MB)
-#   * requires-dotnet8 - framework dependent, ~2 MB, needs the .NET 8 runtime
+#   * requires-dotnet8 - framework dependent, ~0.5 MB, needs .NET 8 runtime
 # Re-running for the same tag uploads over the existing assets ("--clobber")
 # instead of failing, so the workflow is safe to retry.
 
@@ -52,7 +52,7 @@ jobs:
           -p:EnableCompressionInSingleFile=true
           -o build/full
 
-      # Bundle B: framework dependent - ~2 MB, needs the .NET 8 runtime.
+      # Bundle B: framework dependent - ~0.5 MB, needs .NET 8 runtime.
       - name: Publish framework dependent (requires-dotnet8)
         run: >
           dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj

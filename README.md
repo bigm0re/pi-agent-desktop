@@ -18,7 +18,7 @@
 | 附件 | 大小 | 前置要求 |
 | --- | --- | --- |
 | `...-win-x64-portable.zip` | 约 58 MB | 只需 Node.js 22.19+（推荐，开箱即用） |
-| `...-win-x64-requires-dotnet8.zip` | 约 2 MB | 另需 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| `...-win-x64-requires-dotnet8.zip` | 约 0.5 MB | 另需 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) |
 
 两者都需要 **Node.js 22.19+**；`@agegr/pi-web` 若未安装，程序会提示并可一键安装。
 
