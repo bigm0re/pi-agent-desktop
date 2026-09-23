@@ -107,6 +107,17 @@ internal sealed class PiWebServer : IDisposable
 
         var token = _lifetime!.Token;
         LastError = null;
+
+        // Never stack a server on top of a leaked one: that shifts the port and leaves yet
+        // another process holding the package directory. That is exactly what turned a
+        // single leak into four servers on ports 30141-30144.
+        var leftovers = _job?.KillAll(_log) ?? 0;
+        if (leftovers > 0)
+        {
+            _log.Warn($"Reaped {leftovers} leftover pi-web process(es) before starting.");
+            await Task.Delay(500).ConfigureAwait(false);
+        }
+
         SetState(PiWebServerState.Starting, "正在查找 pi agent 运行环境…");
 
         Installation ??= PiWebLocator.FindPiWeb(_config, _log);
@@ -242,6 +253,16 @@ internal sealed class PiWebServer : IDisposable
         if (process is not null)
         {
             await KillProcessTreeAsync(process).ConfigureAwait(false);
+        }
+
+        // The code above only knows about the process being tracked right now. A failed or
+        // timed-out start can leave earlier trees behind, and every one of them keeps the
+        // pi-web package directory locked, so npm cannot replace it. The job knows them all.
+        var reaped = _job?.KillAll(_log) ?? 0;
+        if (reaped > 0)
+        {
+            _log.Warn($"Reaped {reaped} leftover pi-web process(es).");
+            await Task.Delay(500).ConfigureAwait(false);
         }
 
         Url = null;

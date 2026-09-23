@@ -11,6 +11,7 @@ namespace PiAgentDesktop;
 internal sealed class JobObject : IDisposable
 {
     private const int JobObjectExtendedLimitInformationClass = 9;
+    private const int JobObjectBasicProcessIdListClass = 3;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
 
     private IntPtr _handle;
@@ -74,6 +75,107 @@ internal sealed class JobObject : IDisposable
         }
     }
 
+    /// <summary>
+    /// Process ids currently assigned to the job, i.e. every pi-web process tree this app
+    /// has spawned - including any that a failed or timed-out start leaked and that the
+    /// server no longer tracks.
+    /// </summary>
+    public IReadOnlyList<int> GetProcessIds()
+    {
+        if (_handle == IntPtr.Zero)
+        {
+            return Array.Empty<int>();
+        }
+
+        // Ask for the required buffer size first: a deliberately small buffer fails with
+        // ERROR_MORE_DATA and reports how much is actually needed, so the real read can
+        // never come up short and silently report "no processes".
+        var probeSize = 8 + IntPtr.Size;
+        var probe = Marshal.AllocHGlobal(probeSize);
+        uint needed;
+
+        try
+        {
+            QueryInformationJobObject(
+                _handle, JobObjectBasicProcessIdListClass, probe, (uint)probeSize, out needed);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(probe);
+        }
+
+        if (needed < 8 || needed > 1_048_576)
+        {
+            return Array.Empty<int>();
+        }
+
+        var buffer = Marshal.AllocHGlobal((int)needed);
+
+        try
+        {
+            if (!QueryInformationJobObject(
+                    _handle, JobObjectBasicProcessIdListClass, buffer, needed, out _))
+            {
+                return Array.Empty<int>();
+            }
+
+            var count = Marshal.ReadInt32(buffer, 4);
+            var ids = new List<int>();
+            var capacity = (int)((needed - 8) / (uint)IntPtr.Size);
+
+            for (var i = 0; i < count && i < capacity; i++)
+            {
+                var pid = Marshal.ReadIntPtr(buffer, 8 + (IntPtr.Size * i)).ToInt64();
+                if (pid > 0)
+                {
+                    ids.Add((int)pid);
+                }
+            }
+
+            return ids;
+        }
+        catch
+        {
+            return Array.Empty<int>();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Terminates every process still assigned to the job and returns how many. This is
+    /// how leftover servers get reaped: each of them holds the pi-web package directory,
+    /// so npm cannot replace it (EBUSY) until all of them are gone.
+    /// </summary>
+    public int KillAll(Log log)
+    {
+        var killed = 0;
+
+        foreach (var pid in GetProcessIds())
+        {
+            try
+            {
+                using var process = Process.GetProcessById(pid);
+                log.Warn($"Reaping leftover pi-web process (pid {pid}, {process.ProcessName}).");
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5_000);
+                killed++;
+            }
+            catch (ArgumentException)
+            {
+                /* already gone */
+            }
+            catch (Exception error)
+            {
+                log.Warn($"Could not terminate pid {pid}: {error.Message}");
+            }
+        }
+
+        return killed;
+    }
+
     public void Dispose()
     {
         if (_handle == IntPtr.Zero)
@@ -120,6 +222,9 @@ internal sealed class JobObject : IDisposable
         public UIntPtr PeakProcessMemoryUsed;
         public UIntPtr PeakJobMemoryUsed;
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint informationLength, out uint returnLength);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObjectW(IntPtr securityAttributes, string? name);
