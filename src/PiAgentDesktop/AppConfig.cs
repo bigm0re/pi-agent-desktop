@@ -69,13 +69,22 @@ internal sealed class AppConfig
     public int MemoryWarnMegabytes { get; set; } = 3000;
 
     /// <summary>
-    /// Ask GitHub for the latest release on startup and then periodically. Only the check
-    /// is automatic; installing a newer build stays a deliberate click.
+    /// Ask GitHub for the latest release on startup and then periodically.
     /// </summary>
     public bool CheckForUpdates { get; set; } = true;
 
     /// <summary>How many hours between automatic update checks (minimum 1).</summary>
     public int UpdateCheckHours { get; set; } = 6;
+
+    /// <summary>Download a discovered update in the background, ready to install.</summary>
+    public bool AutoDownloadUpdates { get; set; } = true;
+
+    /// <summary>
+    /// Install an already-downloaded update after the app exits, then start the new
+    /// version again. The file swap runs in a detached helper, because a running
+    /// program cannot overwrite its own executable on Windows.
+    /// </summary>
+    public bool AutoApplyOnExit { get; set; } = true;
 
     [JsonIgnore]
     public string FilePath { get; private set; } = string.Empty;

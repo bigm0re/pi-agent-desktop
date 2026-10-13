@@ -53,7 +53,10 @@ internal sealed class TrayContext : ApplicationContext
     private System.Windows.Forms.Timer? _updateTimer;
     private UpdateInfo? _latestUpdate;
     private string? _notifiedUpdateVersion;
+    private string? _stagedVersion;
     private bool _checkingForUpdate;
+    private bool _downloadingUpdate;
+    private ToolStripMenuItem? _autoApplyItem;
 
     public TrayContext(AppConfig config, LaunchOptions options, Log log, JobObject? job)
     {
@@ -236,6 +239,16 @@ internal sealed class TrayContext : ApplicationContext
         _npmItem.Click += (_, _) => RepairNpmCommand(announce: true);
         _installItem.Click += async (_, _) => await InstallOrUpdatePiWebAsync().ConfigureAwait(true);
         _memoryItem.Click += (_, _) => ShowMemoryReport();
+        _autoApplyItem = new ToolStripMenuItem("退出时自动完成更新并重启")
+        {
+            CheckOnClick = false,
+            Checked = _config.AutoApplyOnExit,
+        };
+        _autoApplyItem.Click += (_, _) =>
+        {
+            ToggleSetting(() => _config.AutoApplyOnExit = !_config.AutoApplyOnExit);
+            _autoApplyItem.Checked = _config.AutoApplyOnExit;
+        };
         _updateItem.Click += (_, _) => OnUpdateItemClicked();
         _exitItem.Click += (_, _) => ExitApp();
 
@@ -260,6 +273,7 @@ internal sealed class TrayContext : ApplicationContext
             _installItem,
             _memoryItem,
             _updateItem,
+            _autoApplyItem,
             new ToolStripSeparator(),
             _versionItem,
             _exitItem,
@@ -370,7 +384,14 @@ internal sealed class TrayContext : ApplicationContext
 
             if (info.IsNewer)
             {
-                _updateItem.Text = $"发现新版本 {info.Version} — 点击查看";
+                if (_config.AutoDownloadUpdates && !Updater.IsStaged(info.Version))
+                {
+                    _ = DownloadUpdateAsync(info);
+                }
+
+                _updateItem.Text = Updater.IsStaged(info.Version)
+                    ? $"退出时自动更新到 {info.Version}"
+                    : $"发现新版本 {info.Version} — 点击更新";
 
                 if (_notifiedUpdateVersion != info.Version)
                 {
@@ -378,7 +399,9 @@ internal sealed class TrayContext : ApplicationContext
                     _tray?.ShowBalloonTip(
                         10000,
                         "Pi Agent Desktop 有新版本",
-                        $"当前 {AppInfo.Version}，最新 {info.Version}。点击托盘菜单「发现新版本」打开发布页。",
+                        _config.AutoApplyOnExit
+                            ? $"当前 {AppInfo.Version}，最新 {info.Version}。正在后台下载，退出后自动安装并重启。"
+                            : $"当前 {AppInfo.Version}，最新 {info.Version}。点击托盘菜单项可立即更新。",
                         ToolTipIcon.Info);
                 }
             }
@@ -413,14 +436,83 @@ internal sealed class TrayContext : ApplicationContext
 
     private void OnUpdateItemClicked()
     {
-        // A known newer release opens its page; otherwise the click means "check now".
-        if (_latestUpdate is { IsNewer: true } info)
+        var info = _latestUpdate;
+
+        // Nothing newer (or no check has run yet): the click means "check now".
+        if (info is not { IsNewer: true })
         {
-            AgentWindow.OpenExternal(info.ReleaseUrl);
+            _ = CheckForUpdatesAsync(manual: true);
             return;
         }
 
-        _ = CheckForUpdatesAsync(manual: true);
+        if (Updater.IsStaged(info.Version))
+        {
+            var answer = MessageBox.Show(
+                $"将立即退出并安装 {info.Version}，安装完成后自动重新启动。\n\n" +
+                $"当前版本：{AppInfo.Version}\n安装位置：{AppContext.BaseDirectory}\n\n" +
+                "安装前会把当前 PiAgentDesktop.exe 备份为 PiAgentDesktop.exe.bak。\n继续吗？",
+                "Pi Agent Desktop 更新",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question);
+
+            if (answer == DialogResult.OK)
+            {
+                ExitApp();
+            }
+
+            return;
+        }
+
+        _ = DownloadUpdateAsync(info);
+    }
+
+    /// <summary>Downloads and stages an update, then reports the outcome in the tray.</summary>
+    private async Task DownloadUpdateAsync(UpdateInfo info)
+    {
+        if (_downloadingUpdate || _disposed)
+        {
+            return;
+        }
+
+        var url = Updater.SelectAsset(info.Assets);
+        if (url is null)
+        {
+            _log.Warn($"Release {info.Version} has no asset for bundle kind '{Updater.BundleKind}'.");
+            _updateItem.Text = $"新版本 {info.Version} 下载失败（详见日志）";
+            return;
+        }
+
+        _downloadingUpdate = true;
+        _updateItem.Text = $"正在下载 {info.Version}…";
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+            var downloaded = await Updater
+                .DownloadAsync(info.Version, url, _log, timeout.Token)
+                .ConfigureAwait(true);
+
+            if (!downloaded)
+            {
+                _updateItem.Text = $"新版本 {info.Version} 下载失败（详见日志）";
+                return;
+            }
+
+            _stagedVersion = info.Version;
+            _updateItem.Text = $"退出时自动更新到 {info.Version}";
+
+            _tray?.ShowBalloonTip(
+                10000,
+                "Pi Agent Desktop 更新已就绪",
+                _config.AutoApplyOnExit
+                    ? $"{info.Version} 已下载。退出本程序后会自动完成安装并重新启动。"
+                    : $"{info.Version} 已下载。点托盘菜单项可立即退出并安装。",
+                ToolTipIcon.Info);
+        }
+        finally
+        {
+            _downloadingUpdate = false;
+        }
     }
 
     private void WarnIfMemoryHigh(string report)
@@ -984,6 +1076,26 @@ internal sealed class TrayContext : ApplicationContext
 
         _exiting = true;
         _log.Info("Shutdown requested.");
+
+        // Install a staged update on the way out. A running program cannot replace its
+        // own executable on Windows, so a detached helper waits for this process to
+        // exit, swaps the files and starts the new version.
+        var staged = _stagedVersion;
+        if (staged is null &&
+            _latestUpdate is { IsNewer: true } pending &&
+            Updater.IsStaged(pending.Version))
+        {
+            // Downloaded during an earlier run.
+            staged = pending.Version;
+        }
+
+        if (_config.AutoApplyOnExit && staged is not null && !_options.SmokeTest)
+        {
+            if (Updater.ScheduleApply(staged, _log))
+            {
+                _log.Info($"Update to {staged} will be installed after exit.");
+            }
+        }
 
         DisposeResources();
         ExitThread();

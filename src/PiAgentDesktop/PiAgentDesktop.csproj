@@ -9,7 +9,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>PiAgentDesktop</AssemblyName>
     <RootNamespace>PiAgentDesktop</RootNamespace>
-    <Version>0.1.7</Version>
+    <Version>0.1.8</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -25,6 +25,12 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+  </ItemGroup>
+
+  <!-- Set by the release workflow so the app knows which release asset to fetch
+       when it updates itself (self-contained vs. needs-the-runtime). -->
+  <ItemGroup Condition="'$(PiBundleKind)' != ''">
+    <AssemblyMetadata Include="PiBundleKind" Value="$(PiBundleKind)" />
   </ItemGroup>
 
   <ItemGroup>

@@ -38,6 +38,7 @@ jobs:
           dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
           -c Release -r win-x64 --self-contained false
           -p:PublishSingleFile=true
+          -p:PiBundleKind=requires-dotnet8
           -o dist
 
       - name: Report artifact

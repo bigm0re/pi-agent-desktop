@@ -55,6 +55,7 @@ jobs:
           -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true
           -p:EnableCompressionInSingleFile=true
+          -p:PiBundleKind=portable
           -o build/full
 
       # Bundle B: framework dependent - ~0.5 MB zip, needs the .NET 8 runtime.
@@ -63,6 +64,7 @@ jobs:
           dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
           -c Release -r win-x64 --self-contained false
           -p:PublishSingleFile=true
+          -p:PiBundleKind=requires-dotnet8
           -o build/lite
 
       - name: Package both zips and write the release notes

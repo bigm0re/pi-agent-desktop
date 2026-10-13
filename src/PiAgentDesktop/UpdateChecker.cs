@@ -4,12 +4,17 @@ using System.Text.Json;
 namespace PiAgentDesktop;
 
 /// <summary>Result of one update check against the GitHub releases feed.</summary>
-internal sealed record UpdateInfo(string Version, string Tag, string ReleaseUrl, string Notes, bool IsNewer);
+internal sealed record UpdateInfo(
+    string Version,
+    string Tag,
+    string ReleaseUrl,
+    string Notes,
+    bool IsNewer,
+    IReadOnlyList<ReleaseAsset> Assets);
 
 /// <summary>
 /// Asks GitHub for the latest release of this project and compares it with the running
-/// build. This is intentionally only a <em>check</em>: replacing the running program's
-/// own files is a separate, deliberate action.
+/// build. Downloading and installing are handled by <see cref="Updater"/>.
 /// </summary>
 internal static class UpdateChecker
 {
@@ -68,11 +73,40 @@ internal static class UpdateChecker
                 ? bodyElement.GetString() ?? string.Empty
                 : string.Empty;
 
+            var assets = new List<ReleaseAsset>();
+
+            if (root.TryGetProperty("assets", out var assetsElement) &&
+                assetsElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var asset in assetsElement.EnumerateArray())
+                {
+                    var name = asset.TryGetProperty("name", out var nameElement)
+                        ? nameElement.GetString() ?? string.Empty
+                        : string.Empty;
+
+                    var url = asset.TryGetProperty("browser_download_url", out var assetUrl)
+                        ? assetUrl.GetString() ?? string.Empty
+                        : string.Empty;
+
+                    var size = asset.TryGetProperty("size", out var sizeElement) &&
+                               sizeElement.TryGetInt64(out var bytes)
+                        ? bytes
+                        : 0;
+
+                    if (name.Length > 0 && url.Length > 0)
+                    {
+                        assets.Add(new ReleaseAsset(name, url, size));
+                    }
+                }
+            }
+
             var version = Normalize(tag);
             var newer = IsNewer(version, AppInfo.Version);
 
-            log.Info($"Update check: latest={version}, running={AppInfo.Version}, newer={newer}");
-            return new UpdateInfo(version, tag, releaseUrl, notes, newer);
+            log.Info($"Update check: latest={version}, running={AppInfo.Version}, " +
+                     $"bundle={Updater.BundleKind}, newer={newer}");
+
+            return new UpdateInfo(version, tag, releaseUrl, notes, newer, assets);
         }
         catch (OperationCanceledException)
         {
