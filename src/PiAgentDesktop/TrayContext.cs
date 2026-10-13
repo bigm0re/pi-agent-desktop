@@ -32,6 +32,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _startHiddenItem = new("启动时最小化到托盘");
     private readonly ToolStripMenuItem _closeToTrayItem = new("关闭窗口时最小化到托盘");
     private readonly ToolStripMenuItem _memoryItem = new("内存占用报告（memory.log）");
+    private readonly ToolStripMenuItem _updateItem = new("检查更新");
     private readonly ToolStripMenuItem _versionItem = new($"版本 {AppInfo.Version}") { Enabled = false };
     private readonly ToolStripMenuItem _npmItem = new("检查插件更新环境（npmCommand）");
     private readonly ToolStripMenuItem _installItem = new("安装 / 更新 Pi Web…");
@@ -49,6 +50,10 @@ internal sealed class TrayContext : ApplicationContext
     private bool _systemEnding;
     private System.Windows.Forms.Timer? _smokeTimer;
     private System.Windows.Forms.Timer? _memoryTimer;
+    private System.Windows.Forms.Timer? _updateTimer;
+    private UpdateInfo? _latestUpdate;
+    private string? _notifiedUpdateVersion;
+    private bool _checkingForUpdate;
 
     public TrayContext(AppConfig config, LaunchOptions options, Log log, JobObject? job)
     {
@@ -73,6 +78,7 @@ internal sealed class TrayContext : ApplicationContext
 
         RefreshUi();
         StartMemoryWatchdog();
+        StartUpdateCheck();
 
         // Startup runs off the UI thread: it touches the registry and can spawn
         // `cmd /c npm --version`, which must not stall the message loop nor delay
@@ -230,6 +236,7 @@ internal sealed class TrayContext : ApplicationContext
         _npmItem.Click += (_, _) => RepairNpmCommand(announce: true);
         _installItem.Click += async (_, _) => await InstallOrUpdatePiWebAsync().ConfigureAwait(true);
         _memoryItem.Click += (_, _) => ShowMemoryReport();
+        _updateItem.Click += (_, _) => OnUpdateItemClicked();
         _exitItem.Click += (_, _) => ExitApp();
 
         _menu.Items.AddRange(new ToolStripItem[]
@@ -252,6 +259,7 @@ internal sealed class TrayContext : ApplicationContext
             _npmItem,
             _installItem,
             _memoryItem,
+            _updateItem,
             new ToolStripSeparator(),
             _versionItem,
             _exitItem,
@@ -305,6 +313,114 @@ internal sealed class TrayContext : ApplicationContext
         };
         _memoryTimer.Start();
         _log.Info($"Memory watchdog: every {minutes} minute(s) -> {MemoryReport.FilePath}");
+    }
+
+    /// <summary>
+    /// Queries the GitHub releases feed on startup and then periodically, and keeps the
+    /// tray menu showing the outcome. Only the check is automatic: replacing this
+    /// program's own files stays a deliberate click on the menu item.
+    /// </summary>
+    private void StartUpdateCheck()
+    {
+        if (!_config.CheckForUpdates || _options.SmokeTest)
+        {
+            _log.Info("Update check disabled.");
+            return;
+        }
+
+        var hours = Math.Max(1, _config.UpdateCheckHours);
+        _updateTimer = new System.Windows.Forms.Timer { Interval = hours * 60 * 60 * 1000 };
+        _updateTimer.Tick += (_, _) => _ = CheckForUpdatesAsync(manual: false);
+        _updateTimer.Start();
+        _log.Info($"Update check: every {hours} hour(s).");
+
+        _ = CheckForUpdatesAsync(manual: false);
+    }
+
+    private async Task CheckForUpdatesAsync(bool manual)
+    {
+        if (_checkingForUpdate || _disposed)
+        {
+            return;
+        }
+
+        _checkingForUpdate = true;
+
+        if (manual)
+        {
+            _updateItem.Text = "正在检查更新…";
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var info = await UpdateChecker.CheckAsync(_log, timeout.Token).ConfigureAwait(true);
+
+            if (info is null)
+            {
+                if (manual)
+                {
+                    _updateItem.Text = "检查更新失败（详见日志）";
+                }
+
+                return;
+            }
+
+            _latestUpdate = info;
+
+            if (info.IsNewer)
+            {
+                _updateItem.Text = $"发现新版本 {info.Version} — 点击查看";
+
+                if (_notifiedUpdateVersion != info.Version)
+                {
+                    _notifiedUpdateVersion = info.Version;
+                    _tray?.ShowBalloonTip(
+                        10000,
+                        "Pi Agent Desktop 有新版本",
+                        $"当前 {AppInfo.Version}，最新 {info.Version}。点击托盘菜单「发现新版本」打开发布页。",
+                        ToolTipIcon.Info);
+                }
+            }
+            else
+            {
+                _updateItem.Text = manual ? $"已是最新版本（{AppInfo.Version}）" : "检查更新";
+
+                if (manual)
+                {
+                    _tray?.ShowBalloonTip(
+                        6000,
+                        "Pi Agent Desktop",
+                        $"已是最新版本（{AppInfo.Version}）。",
+                        ToolTipIcon.Info);
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            _log.Warn($"Update check failed: {error.Message}");
+
+            if (manual)
+            {
+                _updateItem.Text = "检查更新失败（详见日志）";
+            }
+        }
+        finally
+        {
+            _checkingForUpdate = false;
+        }
+    }
+
+    private void OnUpdateItemClicked()
+    {
+        // A known newer release opens its page; otherwise the click means "check now".
+        if (_latestUpdate is { IsNewer: true } info)
+        {
+            AgentWindow.OpenExternal(info.ReleaseUrl);
+            return;
+        }
+
+        _ = CheckForUpdatesAsync(manual: true);
     }
 
     private void WarnIfMemoryHigh(string report)
@@ -896,6 +1012,8 @@ internal sealed class TrayContext : ApplicationContext
         {
             _memoryTimer?.Stop();
             _memoryTimer?.Dispose();
+            _updateTimer?.Stop();
+            _updateTimer?.Dispose();
         }
         catch
         {

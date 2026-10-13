@@ -68,6 +68,15 @@ internal sealed class AppConfig
     /// <summary>Warn (log + tray) when the tracked total exceeds this many megabytes.</summary>
     public int MemoryWarnMegabytes { get; set; } = 3000;
 
+    /// <summary>
+    /// Ask GitHub for the latest release on startup and then periodically. Only the check
+    /// is automatic; installing a newer build stays a deliberate click.
+    /// </summary>
+    public bool CheckForUpdates { get; set; } = true;
+
+    /// <summary>How many hours between automatic update checks (minimum 1).</summary>
+    public int UpdateCheckHours { get; set; } = 6;
+
     [JsonIgnore]
     public string FilePath { get; private set; } = string.Empty;
 

@@ -1,12 +1,14 @@
 ---
 name: release
 
-# Pushing a tag like v0.1.2 builds TWO portable zips and attaches both to a
-# GitHub Release:
-#   * portable        - self-contained, needs nothing but Node.js (~58 MB)
-#   * requires-dotnet8 - framework dependent, ~0.5 MB, needs .NET 8 runtime
-# Re-running for the same tag uploads over the existing assets ("--clobber")
-# instead of failing, so the workflow is safe to retry.
+# Pushing a tag like v0.1.7 builds TWO portable zips and attaches both to a
+# GitHub Release, together with the update notes for that version:
+#   * portable         - self-contained, needs nothing but Node.js (~58 MB)
+#   * requires-dotnet8 - framework dependent, ~0.5 MB, needs the .NET 8 runtime
+#
+# The notes come from CHANGELOG.md when it has a section for the version,
+# otherwise from a summary of the commits in the tag range. Re-running for the
+# same tag uploads over the existing assets ("--clobber") instead of failing.
 
 "on":
   push:
@@ -22,7 +24,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # Full history and tags: the release notes are built from the tag range.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -52,7 +57,7 @@ jobs:
           -p:EnableCompressionInSingleFile=true
           -o build/full
 
-      # Bundle B: framework dependent - ~0.5 MB, needs .NET 8 runtime.
+      # Bundle B: framework dependent - ~0.5 MB zip, needs the .NET 8 runtime.
       - name: Publish framework dependent (requires-dotnet8)
         run: >
           dotnet publish src/PiAgentDesktop/PiAgentDesktop.csproj
@@ -65,6 +70,7 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.value }}'
+          $tag = "v$version"
           $full = "PiAgentDesktop-$version-win-x64-portable"
           $lite = "PiAgentDesktop-$version-win-x64-requires-dotnet8"
 
@@ -76,7 +82,7 @@ jobs:
             # XML docs are not needed at runtime.
             Get-ChildItem $stage -Recurse -File -Include *.xml |
               Remove-Item -Force
-            Copy-Item README.md, LICENSE $stage -Force
+            Copy-Item README.md, LICENSE, CHANGELOG.md $stage -Force
             $zip = "$Name.zip"
             Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
             Write-Host ("{0} = {1} MB" -f $zip, `
@@ -93,26 +99,47 @@ jobs:
           $fullSha = (Get-FileHash $fullZip -Algorithm SHA256).Hash
           $liteSha = (Get-FileHash $liteZip -Algorithm SHA256).Hash
 
+          # ---- 更新内容: CHANGELOG section, else the commit range ----
+          $changes = ''
+          if (Test-Path 'CHANGELOG.md') {
+            $text = Get-Content 'CHANGELOG.md' -Raw
+            $escaped = [regex]::Escape($version)
+            $pattern = "(?ms)^##\s+\[?$escaped\]?[^\r\n]*\r?\n" +
+                       ".*?(?=^##\s|\z)"
+            $match = [regex]::Match($text, $pattern)
+            if ($match.Success) { $changes = $match.Value.Trim() }
+          }
+
+          if (-not $changes) {
+            Write-Host 'no CHANGELOG section; summarising commits'
+            $previous = git describe --tags --abbrev=0 "$tag^" 2>$null
+            $range = $tag
+            if ($previous) { $range = "$previous..$tag" }
+            $subjects = git log --pretty='- %s' -n 30 $range
+            $changes = "## $version`n`n" + ($subjects -join "`n")
+          }
+
           $runtime = 'https://dotnet.microsoft.com/download/dotnet/8.0'
           $notes = @(
+            $changes
+            ''
+            '---'
+            ''
             '## 下载哪个？'
             ''
             '两个附件功能完全相同，区别只是**有没有把 .NET 运行时打进包里**。'
             ''
             '| 附件 | 大小 | 前置要求 |'
             '| --- | --- | --- |'
-            "| $fullZip | $fullMb MB | 只需 Node.js 22.19+（推荐，开箱即用） |"
+            "| $fullZip | $fullMb MB | 只需 Node.js 22.19+（推荐） |"
             "| $liteZip | $liteMb MB | 另需 .NET 8 Desktop Runtime |"
-            ''
-            '两者都需要 **Node.js 22.19+**；`@agegr/pi-web` 若未安装，'
-            '程序会提示并可一键安装。'
             ''
             "需要 .NET 8 Desktop Runtime 时：$runtime"
             ''
             '### 使用'
             ''
             '1. 解压到任意目录（不写安装目录、不注册服务）'
-            '2. 双击 `PiAgentDesktop.exe`'
+            '2. 双击 PiAgentDesktop.exe'
             '3. 托盘出现图标，点击打开界面；卸载 = 删除该文件夹'
             ''
             '### 校验'
@@ -153,6 +180,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             Write-Host "release $tag already exists; uploading assets"
             gh release upload $tag $full $lite --clobber
+            gh release edit $tag --notes-file release-notes.md
           }
           else {
             gh release create $tag $full $lite `
