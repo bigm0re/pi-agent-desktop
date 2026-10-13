@@ -77,11 +77,13 @@
 
 | 位置 | 内容 |
 | --- | --- |
-| 窗口标题 | `Pi Agent Desktop 0.1.2 — 127.0.0.1:30141` |
-| 托盘菜单（"退出"上一行） | `版本 0.1.2` |
-| 日志首行 | `=== Pi Agent Desktop 0.1.2 starting ===` |
+| 窗口标题 | `Pi Agent Desktop x.y.z — 127.0.0.1:30141` |
+| 托盘菜单（"退出"上一行） | `版本 x.y.z` |
+| 日志首行 | `=== Pi Agent Desktop x.y.z starting ===` |
 
 日志：`%APPDATA%\PiAgentDesktop\logs\desktop.log`（含 pi-web 的 stdout/stderr）。
+
+完整变更记录见 [CHANGELOG.md](CHANGELOG.md)；发布时该版本段落会**自动**写进 GitHub Release 说明。
 
 ## 故障排查
 
@@ -91,6 +93,7 @@
 | 托盘显示"启动失败" | 打开日志看 pi-web 报错（常见：未装 `@agegr/pi-web`、Node 版本过低） |
 | 更新 pi-web 报 `EBUSY: resource busy or locked` | pi-web 目录被占用（运行中的 pi-web 自己就会占用它）。优先用托盘菜单「安装 / 更新 Pi Web…」，它会先停服务；若仍失败，完全退出本程序与其它 pi-web 窗口后，在终端执行 `npm install -g @agegr/pi-web@latest`，再启动本程序 |
 | 长时间运行后内存被占满 | 看 `%APPDATA%\PiAgentDesktop\logs\memory.log`：每 15 分钟自动追加一次，托盘菜单「内存占用报告（memory.log）」可立即生成并打开。它把占用拆成 **外壳 / agent 进程树 / WebView2** 三段，能直接看出是哪一段在涨 |
+| 更新后程序没起来 | 看 `%APPDATA%\PiAgentDesktop\logs\update.log`；旧的 exe 备份在同目录 `PiAgentDesktop.exe.bak`，改名回来即可回滚 |
 | 提示缺少 .NET | 换用 `portable` 包，或安装 .NET 8 Desktop Runtime |
 | 想彻底清理 | 删掉上面三处（`HKCU\...\Run` 里那条按需删）+ 解压目录 |
 
@@ -119,6 +122,12 @@
 | `WindowWidth` / `WindowHeight` / `WindowMaximized` | `1280` / `840` / `false` | 窗口尺寸记忆 |
 | `RestartOnCrash` / `MaxRestarts` | `true` / `5` | 崩溃重启策略 |
 | `ReadyTimeoutMs` | `120000` | 等待服务就绪上限 |
+| `MemoryWatchdogMinutes` | `15` | 内存看门狗间隔（分钟），`0` 关闭 |
+| `MemoryWarnMegabytes` | `3000` | 占用超过该值时写日志并弹托盘气泡 |
+| `CheckForUpdates` | `true` | 是否检查 GitHub 最新版本 |
+| `UpdateCheckHours` | `6` | 自动检查更新的间隔（小时） |
+| `AutoDownloadUpdates` | `true` | 发现新版本后在后台自动下载 |
+| `AutoApplyOnExit` | `true` | **退出程序后自动完成安装并重启**；关掉则只在托盘提示，需手动点菜单项 |
 
 </details>
 
@@ -158,8 +167,10 @@ PiAgentDesktop.exe [--show] [--hidden] [--no-tray] [--port <n>]
 随 Windows 启动                 启动时最小化到托盘     关闭窗口时最小化到托盘
 ────────────────────────
 检查插件更新环境（npmCommand）   安装 / 更新 Pi Web…
+内存占用报告（memory.log）        检查更新（发现新版时显示版本号）
 ────────────────────────
-版本 0.1.2
+退出时自动完成更新并重启
+版本 x.y.z
 退出
 ```
 
