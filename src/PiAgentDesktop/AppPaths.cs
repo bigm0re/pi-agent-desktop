@@ -61,12 +61,23 @@ internal sealed class Log
     private readonly object _gate = new();
     private readonly string _file;
     private readonly bool _echo;
+    private long _writtenBytes;
 
     public Log(string file, bool echo = false)
     {
         _file = file;
         _echo = echo;
-        TryRotate();
+        RotateIfTooLarge();
+
+        try
+        {
+            var info = new FileInfo(_file);
+            _writtenBytes = info.Exists ? info.Length : 0;
+        }
+        catch
+        {
+            _writtenBytes = 0;
+        }
     }
 
     public string FilePath => _file;
@@ -103,6 +114,15 @@ internal sealed class Log
             try
             {
                 System.IO.File.AppendAllText(_file, line, Encoding.UTF8);
+                _writtenBytes += Encoding.UTF8.GetByteCount(line);
+
+                // Rotation happens while running, not only at startup: an app left running
+                // for weeks would otherwise grow this file without any limit.
+                if (_writtenBytes > MaxBytes)
+                {
+                    RotateIfTooLarge();
+                    _writtenBytes = 0;
+                }
             }
             catch
             {
@@ -116,7 +136,7 @@ internal sealed class Log
         }
     }
 
-    private void TryRotate()
+    private void RotateIfTooLarge()
     {
         try
         {

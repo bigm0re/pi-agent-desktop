@@ -90,6 +90,7 @@
 | 双击后"闪退"、没有窗口 | 多半是已有实例在运行 —— 看托盘是否有图标 |
 | 托盘显示"启动失败" | 打开日志看 pi-web 报错（常见：未装 `@agegr/pi-web`、Node 版本过低） |
 | 更新 pi-web 报 `EBUSY: resource busy or locked` | pi-web 目录被占用（运行中的 pi-web 自己就会占用它）。优先用托盘菜单「安装 / 更新 Pi Web…」，它会先停服务；若仍失败，完全退出本程序与其它 pi-web 窗口后，在终端执行 `npm install -g @agegr/pi-web@latest`，再启动本程序 |
+| 长时间运行后内存被占满 | 看 `%APPDATA%\PiAgentDesktop\logs\memory.log`：每 15 分钟自动追加一次，托盘菜单「内存占用报告（memory.log）」可立即生成并打开。它把占用拆成 **外壳 / agent 进程树 / WebView2** 三段，能直接看出是哪一段在涨 |
 | 提示缺少 .NET | 换用 `portable` 包，或安装 .NET 8 Desktop Runtime |
 | 想彻底清理 | 删掉上面三处（`HKCU\...\Run` 里那条按需删）+ 解压目录 |
 

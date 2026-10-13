@@ -58,6 +58,16 @@ internal sealed class AppConfig
     public int MaxRestarts { get; set; } = 5;
     public int ReadyTimeoutMs { get; set; } = 120_000;
 
+    /// <summary>
+    /// How often the shell appends a memory/process report to memory.log. 0 disables it.
+    /// The report is what makes a slow leak diagnosable: it separates the shell, the
+    /// agent's node tree and WebView2, which are indistinguishable from outside.
+    /// </summary>
+    public int MemoryWatchdogMinutes { get; set; } = 15;
+
+    /// <summary>Warn (log + tray) when the tracked total exceeds this many megabytes.</summary>
+    public int MemoryWarnMegabytes { get; set; } = 3000;
+
     [JsonIgnore]
     public string FilePath { get; private set; } = string.Empty;
 

@@ -31,6 +31,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _autoStartItem = new("随 Windows 启动");
     private readonly ToolStripMenuItem _startHiddenItem = new("启动时最小化到托盘");
     private readonly ToolStripMenuItem _closeToTrayItem = new("关闭窗口时最小化到托盘");
+    private readonly ToolStripMenuItem _memoryItem = new("内存占用报告（memory.log）");
     private readonly ToolStripMenuItem _versionItem = new($"版本 {AppInfo.Version}") { Enabled = false };
     private readonly ToolStripMenuItem _npmItem = new("检查插件更新环境（npmCommand）");
     private readonly ToolStripMenuItem _installItem = new("安装 / 更新 Pi Web…");
@@ -47,6 +48,7 @@ internal sealed class TrayContext : ApplicationContext
     private bool _smokeSettled;
     private bool _systemEnding;
     private System.Windows.Forms.Timer? _smokeTimer;
+    private System.Windows.Forms.Timer? _memoryTimer;
 
     public TrayContext(AppConfig config, LaunchOptions options, Log log, JobObject? job)
     {
@@ -70,6 +72,7 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         RefreshUi();
+        StartMemoryWatchdog();
 
         // Startup runs off the UI thread: it touches the registry and can spawn
         // `cmd /c npm --version`, which must not stall the message loop nor delay
@@ -226,6 +229,7 @@ internal sealed class TrayContext : ApplicationContext
         _closeToTrayItem.Click += (_, _) => ToggleSetting(() => _config.CloseToTray = !_config.CloseToTray);
         _npmItem.Click += (_, _) => RepairNpmCommand(announce: true);
         _installItem.Click += async (_, _) => await InstallOrUpdatePiWebAsync().ConfigureAwait(true);
+        _memoryItem.Click += (_, _) => ShowMemoryReport();
         _exitItem.Click += (_, _) => ExitApp();
 
         _menu.Items.AddRange(new ToolStripItem[]
@@ -247,6 +251,7 @@ internal sealed class TrayContext : ApplicationContext
             new ToolStripSeparator(),
             _npmItem,
             _installItem,
+            _memoryItem,
             new ToolStripSeparator(),
             _versionItem,
             _exitItem,
@@ -272,6 +277,63 @@ internal sealed class TrayContext : ApplicationContext
         _tray.BalloonTipClicked += (_, _) => ShowMainWindow();
 
         _tray.ContextMenuStrip.Opening += (_, _) => RefreshUi();
+    }
+
+    /// <summary>
+    /// Periodically records who is holding memory. A slow leak on a machine left running
+    /// for days is otherwise invisible: the shell, the agent's node tree and WebView2 all
+    /// look like a single process from the outside.
+    /// </summary>
+    private void StartMemoryWatchdog()
+    {
+        var minutes = _config.MemoryWatchdogMinutes;
+        if (minutes <= 0 || _options.SmokeTest)
+        {
+            _log.Info("Memory watchdog disabled.");
+            return;
+        }
+
+        _memoryTimer = new System.Windows.Forms.Timer { Interval = Math.Max(1, minutes) * 60_000 };
+        _memoryTimer.Tick += (_, _) =>
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            WarnIfMemoryHigh(MemoryReport.Append(_job, _log, "periodic"));
+        };
+        _memoryTimer.Start();
+        _log.Info($"Memory watchdog: every {minutes} minute(s) -> {MemoryReport.FilePath}");
+    }
+
+    private void WarnIfMemoryHigh(string report)
+    {
+        var limit = _config.MemoryWarnMegabytes;
+        if (limit <= 0)
+        {
+            return;
+        }
+
+        var tracked = MemoryReport.TrackedMegabytes(report);
+        if (tracked < limit)
+        {
+            return;
+        }
+
+        _log.Warn($"Tracked memory is {tracked} MB, above the {limit} MB threshold.");
+        _tray?.ShowBalloonTip(
+            10000,
+            "Pi Agent Desktop",
+            $"内存占用 {tracked} MB（阈值 {limit} MB）。可用托盘菜单的重启服务，或退出后重开程序回收。",
+            ToolTipIcon.Warning);
+    }
+
+    private void ShowMemoryReport()
+    {
+        MemoryReport.Append(_job, _log, "manual");
+        AppPaths.OpenWithShell(MemoryReport.FilePath);
+        _tray?.ShowBalloonTip(8000, "Pi Agent Desktop", "内存占用报告已追加到 memory.log 并打开。", ToolTipIcon.Info);
     }
 
     private void ToggleWindow()
@@ -829,6 +891,16 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         _disposed = true;
+
+        try
+        {
+            _memoryTimer?.Stop();
+            _memoryTimer?.Dispose();
+        }
+        catch
+        {
+            /* ignore */
+        }
 
         try
         {
